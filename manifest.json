@@ -14,6 +14,19 @@
       "formats": ["mp4", "m3u8"],
       "logo": "https://vk.com/favicon.ico",
       "contentLanguage": ["ru", "en"]
+    },
+    {
+      "id": "dailymotion",
+      "name": "Dailymotion",
+      "description": "Stream movies and shows from Dailymotion",
+      "version": "1.0.0",
+      "author": "Nuvio Developer",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/dailymotion.js",
+      "enabled": true,
+      "formats": ["mp4", "m3u8"],
+      "logo": "https://www.dailymotion.com/favicon.ico",
+      "contentLanguage": ["en", "ro", "fr"]
     }
   ]
 }

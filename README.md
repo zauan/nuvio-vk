@@ -1,6 +1,6 @@
 # nuvio-vk
 
-Nuvio plugin repository that adds [VK Video](https://vkvideo.ru) as a stream source for movies and TV shows.
+Nuvio plugin repository with **VK Video** and **Dailymotion** stream sources for movies and TV shows.
 
 ## Install in Nuvio
 
@@ -10,7 +10,7 @@ Add this repository URL in **Settings → Content & Discovery → Plugins → Ad
 https://raw.githubusercontent.com/zauan/nuvio-vk/main/manifest.json
 ```
 
-Then enable the **VK Video** provider. Adding the repository does not turn the provider on by itself.
+Then enable the **VK Video** and/or **Dailymotion** providers. Adding the repository does not turn any provider on by itself.
 
 You can also paste the same URL under **Plugins** on your Nuvio account dashboard.
 

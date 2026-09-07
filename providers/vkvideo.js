@@ -20,6 +20,17 @@ var PLAYBACK_HEADERS = {
 var cachedToken = null;
 var tokenExpiresAt = 0;
 
+// Manual TMDB → VK mappings. Keys are "tmdbId:mediaType:season:episode".
+// Season/episode are 0 for movies. Values are VK ids: "{ownerId}_{videoId}".
+var VIDEO_MAP = {
+  // Insula Iubirii - Reuniuni (TMDB 329884)
+  "329884:tv:1:1": ["-234899898_456239030"], // reuniuniEp1.mp4
+  "329884:tv:1:2": ["-234899898_456239048"], // insre2.mp4
+  "329884:tv:1:3": ["-234899898_456239061"], // insre3.mp4
+  "329884:tv:1:4": ["-234899898_456239076"], // re13ag26.mp4
+  "329884:tv:1:5": ["-229932356_456239762"], // ins20ag26.mp4
+};
+
 function getStreams(tmdbId, mediaType, season, episode) {
   console.log(
     "[VK Video] Fetching " + mediaType + " " + tmdbId +
@@ -33,19 +44,19 @@ function getStreams(tmdbId, mediaType, season, episode) {
       });
     })
     .then(function (ctx) {
-      var queries = buildSearchQueries(ctx.info, mediaType, season, episode);
-      return searchAllQueries(ctx.token, queries).then(function (videos) {
-        return {
-          info: ctx.info,
-          token: ctx.token,
-          videos: videos,
-        };
+      return getMappedVideos(ctx.token, tmdbId, mediaType, season, episode).then(function (mapped) {
+        if (mapped.length) {
+          console.log("[VK Video] Using " + mapped.length + " mapped video(s)");
+          return resolveMissingFiles(ctx.token, mapped);
+        }
+
+        var queries = buildSearchQueries(ctx.info, mediaType, season, episode);
+        return searchAllQueries(ctx.token, queries).then(function (videos) {
+          var matches = filterVideos(videos, ctx.info, mediaType, season, episode);
+          console.log("[VK Video] Matched " + matches.length + " videos");
+          return resolveMissingFiles(ctx.token, matches.slice(0, 3));
+        });
       });
-    })
-    .then(function (ctx) {
-      var matches = filterVideos(ctx.videos, ctx.info, mediaType, season, episode);
-      console.log("[VK Video] Matched " + matches.length + " videos");
-      return resolveMissingFiles(ctx.token, matches.slice(0, 3));
     })
     .then(function (videos) {
       var streams = [];
@@ -234,6 +245,27 @@ function resolveMissingFiles(token, videos) {
   return Promise.all(jobs);
 }
 
+function mapKey(tmdbId, mediaType, season, episode) {
+  return String(tmdbId) + ":" + mediaType + ":" + Number(season || 0) + ":" + Number(episode || 0);
+}
+
+function getMappedVideos(token, tmdbId, mediaType, season, episode) {
+  var ids = VIDEO_MAP[mapKey(tmdbId, mediaType, season, episode)] || [];
+  if (!ids.length) {
+    return Promise.resolve([]);
+  }
+
+  return Promise.all(
+    ids.map(function (id) {
+      return getVideoById(token, id);
+    })
+  ).then(function (videos) {
+    return videos.filter(function (video) {
+      return video && hasPlayableFile(video.files);
+    });
+  });
+}
+
 function getVideoById(token, videoId) {
   if (!videoId) {
     return Promise.resolve(null);
@@ -389,7 +421,7 @@ function titleMatches(rawTitle, info) {
     tokens.forEach(function (token) {
       if (videoTitle.indexOf(token) !== -1) hits += 1;
     });
-    if (hits === tokens.length || hits >= Math.min(tokens.length, 2)) {
+    if (hits === tokens.length || (tokens.length > 3 && hits >= tokens.length - 1)) {
       return true;
     }
   }
