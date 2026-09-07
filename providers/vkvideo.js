@@ -1,90 +1,107 @@
 /**
- * VK Video Provider for Nuvio (CloudStream Engine Compatible)
+ * Nuvio Provider: VK Video
+ * File: providers/vkvideo.js
  */
 
 const VK_API_VERSION = "5.131";
 
-async function searchAndGetStreams(title, year) {
-  const searchQuery = `${title} ${year || ""}`.trim();
-  const searchUrl = `https://api.vk.com/method/video.search?q=${encodeURIComponent(searchQuery)}&auto_complete=1&sort=2&count=10&v=${VK_API_VERSION}`;
+function getStreams(tmdbId, mediaType, season, episode, title, year) {
+  var searchQuery = encodeURIComponent((title || tmdbId) + " " + (year || ""));
+  var searchUrl =
+    "https://api.vk.com/method/video.search?q=" +
+    searchQuery +
+    "&auto_complete=1&sort=2&count=10&v=" +
+    VK_API_VERSION;
 
-  try {
-    const response = await fetch(searchUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      },
-    });
-
-    const data = await response.json();
-    if (!data.response || !data.response.items) return [];
-
-    const streams = [];
-
-    for (const item of data.response.items) {
-      if (item.player) {
-        const directUrls = await extractVkStreamUrls(item.player);
-        for (const streamInfo of directUrls) {
-          streams.push({
-            name: "VK Video",
-            title: `${item.title} [${streamInfo.quality}]`,
-            url: streamInfo.url,
-            quality: streamInfo.quality,
-            isHls: streamInfo.isHls,
-            headers: {
-              Referer: "https://vk.com/",
-              "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            },
-          });
-        }
+  return fetch(searchUrl, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    },
+  })
+    .then(function (response) {
+      return response.json();
+    })
+    .then(function (data) {
+      if (!data.response || !data.response.items) {
+        return [];
       }
-    }
 
-    return streams;
-  } catch (err) {
-    console.error("VK Video Provider Error:", err);
-    return [];
-  }
-}
-
-async function extractVkStreamUrls(playerUrl) {
-  try {
-    const res = await fetch(playerUrl);
-    const html = await res.text();
-    const configMatch = html.match(/var\s+config\s*=\s*({.*?});/s);
-    const streams = [];
-
-    if (configMatch) {
-      const config = JSON.parse(configMatch[1]);
-      const videoData = (config.params && config.params[0]) || {};
-
-      if (videoData.hls) {
-        streams.push({
-          quality: "Auto (HLS)",
-          url: videoData.hls,
-          isHls: true,
+      var streamPromises = data.response.items.map(function (item) {
+        if (!item.player) return Promise.resolve([]);
+        return extractVkStreamUrls(item.player).then(function (directUrls) {
+          return directUrls.map(function (streamInfo) {
+            return {
+              name: "VK Video",
+              title: item.title + " [" + streamInfo.quality + "]",
+              url: streamInfo.url,
+              quality: streamInfo.quality,
+              type: streamInfo.isHls ? "hls" : "direct",
+              headers: {
+                Referer: "https://vk.com/",
+                "User-Agent":
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+              },
+            };
+          });
         });
-      }
-
-      ["1080", "720", "480", "360"].forEach((q) => {
-        if (videoData[`url${q}`]) {
-          streams.push({
-            quality: `${q}p`,
-            url: videoData[`url${q}`],
-            isHls: false,
-          });
-        }
       });
-    }
 
-    return streams;
-  } catch (e) {
-    return [];
-  }
+      return Promise.all(streamPromises).then(function (results) {
+        return results.reduce(function (acc, val) {
+          return acc.concat(val);
+        }, []);
+      });
+    })
+    .catch(function (err) {
+      return [];
+    });
 }
 
-// Export for Nuvio Local Scraper Engine
-if (typeof module !== "undefined") {
-  module.exports = { searchAndGetStreams };
+function extractVkStreamUrls(playerUrl) {
+  return fetch(playerUrl)
+    .then(function (res) {
+      return res.text();
+    })
+    .then(function (html) {
+      var streams = [];
+      var configMatch =
+        html.match(/var\s+config\s*=\s*({.*?});/s) ||
+        html.match(/al_video\.php.*?({.*?})/s);
+
+      if (configMatch) {
+        try {
+          var config = JSON.parse(configMatch[1]);
+          var params = config.params || [{}];
+          var videoData = params[0] || {};
+
+          if (videoData.hls) {
+            streams.push({
+              quality: "Auto (HLS)",
+              url: videoData.hls,
+              isHls: true,
+            });
+          }
+
+          var qualities = ["1080", "720", "480", "360", "240"];
+          qualities.forEach(function (q) {
+            if (videoData["url" + q]) {
+              streams.push({
+                quality: q + "p",
+                url: videoData["url" + q],
+                isHls: false,
+              });
+            }
+          });
+        } catch (e) {}
+      }
+      return streams;
+    })
+    .catch(function () {
+      return [];
+    });
 }
+
+module.exports = {
+  getStreams: getStreams,
+};
