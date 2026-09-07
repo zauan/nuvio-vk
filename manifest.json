@@ -13,7 +13,7 @@
       "authors": ["Nuvio Developer"],
       "status": 1,
       "type": 1,
-      "url": "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME/main/providers/vkvideo.js",
+      "url": "https://raw.githubusercontent.com/zauan/nuvio-vk/main/providers/vkvideo.js",
       "iconUrl": "https://vk.com/favicon.ico"
     }
   ]
