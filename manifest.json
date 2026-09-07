@@ -9,6 +9,7 @@
   "entrypoint": "plugin.js",
   "types": [
     "movie",
+    "tv",
     "series",
     "anime"
   ],
