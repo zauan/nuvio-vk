@@ -1,5 +1,5 @@
 /**
- * Nuvio Provider: VK Video
+ * Nuvio Local Provider: VK Video
  * File: providers/vkvideo.js
  */
 
@@ -53,7 +53,7 @@ function getStreams(tmdbId, mediaType, season, episode, title, year) {
         }, []);
       });
     })
-    .catch(function (err) {
+    .catch(function () {
       return [];
     });
 }
