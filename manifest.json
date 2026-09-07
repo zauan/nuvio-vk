@@ -1,16 +1,17 @@
 {
   "id": "com.nuvio.vkvideo.repo",
   "name": "VK Video Repository",
-  "description": "VK Video Stream Provider for Nuvio",
-  "providers": [
+  "version": "1.0.0",
+  "description": "VK Video Scraper Repository for Nuvio",
+  "plugins": [
     {
       "id": "com.nuvio.vkvideo",
       "name": "VK Video",
-      "filename": "providers/vkvideo.js",
-      "supportedTypes": ["movie", "tv", "anime"],
-      "enabled": true,
       "version": "1.0.0",
-      "logo": "https://vk.com/favicon.ico"
+      "description": "Stream movies and shows from VK Video",
+      "authors": ["Nuvio Developer"],
+      "url": "https://raw.githubusercontent.com/zauan/nuvio-vk/main/providers/vkvideo.js",
+      "iconUrl": "https://vk.com/favicon.ico"
     }
   ]
 }
