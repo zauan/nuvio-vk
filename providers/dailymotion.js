@@ -47,13 +47,17 @@ var MONTHS_EN = [
 ];
 
 // Manual TMDB → Dailymotion mappings. Keys are "tmdbId:mediaType:season:episode".
+// Prefer moremusic (https://www.dailymotion.com/user/moremusic/videos) for Romanian TV.
 var VIDEO_MAP = {
-  "329884:tv:1:1": ["xarl8oa", "xarlcca"],
-  "329884:tv:1:2": ["xb29ztq"],
-  "329884:tv:1:3": ["xb3dblm"],
-  "329884:tv:1:4": ["xb18vky"],
-  "329884:tv:1:5": ["xb0oueq"],
+  "329884:tv:1:1": ["xarl2pi", "xarlbya", "xarl8oa", "xarlcca"],
+  "329884:tv:1:2": ["xatiixa", "xatoa4a", "xb29ztq", "xatofku"],
+  "329884:tv:1:3": ["xavja42", "xavk1qe", "xb3dblm"],
+  "329884:tv:1:4": ["xaxi3hi", "xaxij32", "xb18vky", "xb0uzt6"],
+  "329884:tv:1:5": ["xazd6le", "xaze0iu", "xb0oueq"],
 };
+
+var PREFERRED_CHANNELS = ["moremusic"];
+var MAX_VIDEOS = 12;
 
 function getStreams(tmdbId, mediaType, season, episode) {
   console.log(
@@ -64,18 +68,35 @@ function getStreams(tmdbId, mediaType, season, episode) {
   return getTmdbInfo(tmdbId, mediaType, season, episode)
     .then(function (info) {
       var mappedIds = VIDEO_MAP[mapKey(tmdbId, mediaType, season, episode)] || [];
-      if (mappedIds.length) {
-        console.log("[Dailymotion] Using " + mappedIds.length + " mapped video(s)");
-        return Promise.all(mappedIds.map(getVideoMetadata)).then(function (videos) {
-          return videos.filter(Boolean);
-        });
-      }
-
       var queries = buildSearchQueries(info, mediaType, season, episode);
-      return searchAllQueries(queries).then(function (videos) {
-        var matches = filterVideos(videos, info, mediaType, season, episode);
-        console.log("[Dailymotion] Matched " + matches.length + " videos");
-        return matches.slice(0, 4);
+
+      var mapped = Promise.all(mappedIds.map(getVideoMetadata)).then(function (videos) {
+        return videos.filter(Boolean);
+      });
+      var fromChannels = searchPreferredChannels(queries).then(function (videos) {
+        return filterVideos(videos, info, mediaType, season, episode);
+      });
+      var fromGlobal = searchAllQueries(queries).then(function (videos) {
+        return filterVideos(videos, info, mediaType, season, episode);
+      });
+
+      return Promise.all([mapped, fromChannels, fromGlobal]).then(function (parts) {
+        var combined = uniqueVideos(parts[0].concat(parts[1]).concat(parts[2])).slice(
+          0,
+          MAX_VIDEOS
+        );
+        console.log(
+          "[Dailymotion] Matched " +
+            combined.length +
+            " videos (" +
+            parts[0].length +
+            " mapped, " +
+            parts[1].length +
+            " channel, " +
+            parts[2].length +
+            " search)"
+        );
+        return combined;
       });
     })
     .then(function (videos) {
@@ -192,7 +213,7 @@ function searchAllQueries(queries) {
   var results = [];
 
   function next(index) {
-    if (index >= queries.length || results.length >= 25) {
+    if (index >= queries.length || results.length >= 40) {
       return Promise.resolve(results);
     }
     return searchDailymotion(queries[index]).then(function (videos) {
@@ -208,12 +229,70 @@ function searchAllQueries(queries) {
   return next(0);
 }
 
+function searchPreferredChannels(queries) {
+  if (!PREFERRED_CHANNELS.length || !queries.length) {
+    return Promise.resolve([]);
+  }
+
+  var jobs = [];
+  PREFERRED_CHANNELS.forEach(function (channel) {
+    queries.forEach(function (query) {
+      jobs.push(searchChannelVideos(channel, query));
+    });
+  });
+
+  return Promise.all(jobs).then(function (groups) {
+    var seen = {};
+    var results = [];
+    groups.forEach(function (videos) {
+      videos.forEach(function (video) {
+        if (!video.id || seen[video.id]) return;
+        seen[video.id] = true;
+        video.channel = video.channel || "moremusic";
+        results.push(video);
+      });
+    });
+    return results;
+  });
+}
+
+function searchChannelVideos(channel, query) {
+  var url =
+    "https://api.dailymotion.com/user/" +
+    encodeURIComponent(channel) +
+    "/videos?search=" +
+    encodeURIComponent(query) +
+    "&fields=id,title,duration,url" +
+    "&limit=30&sort=relevance";
+
+  console.log("[Dailymotion] Channel " + channel + ": " + query);
+
+  return fetch(url, {
+    headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
+  })
+    .then(function (response) {
+      return response.json();
+    })
+    .then(function (data) {
+      return (data.list || []).map(function (video) {
+        video.channel = channel;
+        return video;
+      });
+    })
+    .catch(function (error) {
+      console.error(
+        "[Dailymotion] Channel search failed: " + (error && error.message)
+      );
+      return [];
+    });
+}
+
 function searchDailymotion(query) {
   var url =
     "https://api.dailymotion.com/videos?search=" +
     encodeURIComponent(query) +
     "&fields=id,title,duration,url" +
-    "&limit=20&sort=relevance";
+    "&limit=30&sort=relevance";
 
   console.log("[Dailymotion] Search: " + query);
 
@@ -254,6 +333,7 @@ function getVideoMetadata(videoId) {
         title: data.title || videoId,
         duration: data.duration || 0,
         qualities: data.qualities,
+        channel: data.owner && data.owner.username ? data.owner.username : "",
       };
     })
     .catch(function () {
@@ -277,6 +357,9 @@ function filterVideos(videos, info, mediaType, season, episode) {
       var hasEpisode = episodeMatches(normalized, season, episode);
       var hasDate = info.airDate && dateMatches(normalized, info.airDate);
       if (!hasEpisode && !hasDate) return false;
+      if (Number(season) > 1 && !seasonMatches(normalized, season) && !hasDate) {
+        return false;
+      }
     }
 
     if (mediaType !== "tv" && info.year && !yearMatches(title, info.year)) {
@@ -292,7 +375,9 @@ function streamsFromVideo(video) {
     return Promise.resolve(extractStreams(video));
   }
   return getVideoMetadata(video.id).then(function (full) {
-    return full ? extractStreams(full) : [];
+    if (!full) return [];
+    if (video.channel && !full.channel) full.channel = video.channel;
+    return extractStreams(full);
   });
 }
 
@@ -300,6 +385,7 @@ function extractStreams(video) {
   var streams = [];
   var qualities = video.qualities || {};
   var title = video.title || "Dailymotion";
+  var channel = video.channel ? " · " + video.channel : "";
   var seen = {};
 
   Object.keys(qualities).forEach(function (label) {
@@ -313,7 +399,7 @@ function extractStreams(video) {
       var quality = label === "auto" ? "Auto" : /p$/.test(label) ? label : label + "p";
       streams.push({
         name: "Dailymotion",
-        title: title + " [" + quality + "]",
+        title: title + channel + " [" + quality + "]",
         url: url,
         quality: quality,
         type: type,
@@ -327,6 +413,17 @@ function extractStreams(video) {
 
 function mapKey(tmdbId, mediaType, season, episode) {
   return String(tmdbId) + ":" + mediaType + ":" + Number(season || 0) + ":" + Number(episode || 0);
+}
+
+function uniqueVideos(videos) {
+  var seen = {};
+  var result = [];
+  videos.forEach(function (video) {
+    if (!video || !video.id || seen[video.id]) return;
+    seen[video.id] = true;
+    result.push(video);
+  });
+  return result;
 }
 
 function isJunkTitle(normalized) {
@@ -379,8 +476,10 @@ function episodeMatches(normalizedTitle, season, episode) {
     " episodul " + paddedE + " ",
     " episod " + e + " ",
     " episode " + e + " ",
+    " epsiodul " + e + " ",
     " ep " + e + " ",
-    " " + s + " сезон " + e + " серия ",
+    " ep" + e + " ",
+    " " + s + " sezon " + e + " серия ",
     " серия " + e + " ",
   ];
   for (var i = 0; i < patterns.length; i++) {
@@ -389,6 +488,17 @@ function episodeMatches(normalizedTitle, season, episode) {
     }
   }
   return false;
+}
+
+function seasonMatches(normalizedTitle, season) {
+  var s = String(Number(season));
+  var paddedTitle = " " + normalizedTitle + " ";
+  return (
+    paddedTitle.indexOf(" sezonul " + s + " ") !== -1 ||
+    paddedTitle.indexOf(" season " + s + " ") !== -1 ||
+    paddedTitle.indexOf(" s" + pad(season) + " ") !== -1 ||
+    paddedTitle.indexOf(" s" + pad(season) + "e") !== -1
+  );
 }
 
 function dateSearchText(airDate) {
