@@ -57,7 +57,8 @@ var VIDEO_MAP = {
 };
 
 var PREFERRED_CHANNELS = ["moremusic"];
-var MAX_VIDEOS = 12;
+var MAX_VIDEOS = 20;
+var channelCatalogCache = {};
 
 function getStreams(tmdbId, mediaType, season, episode) {
   console.log(
@@ -73,9 +74,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
       var mapped = Promise.all(mappedIds.map(getVideoMetadata)).then(function (videos) {
         return videos.filter(Boolean);
       });
-      var fromChannels = searchPreferredChannels(queries).then(function (videos) {
-        return filterVideos(videos, info, mediaType, season, episode);
-      });
+      var fromChannels = listPreferredChannelMatches(info, mediaType, season, episode);
       var fromGlobal = searchAllQueries(queries).then(function (videos) {
         return filterVideos(videos, info, mediaType, season, episode);
       });
@@ -229,62 +228,67 @@ function searchAllQueries(queries) {
   return next(0);
 }
 
-function searchPreferredChannels(queries) {
-  if (!PREFERRED_CHANNELS.length || !queries.length) {
+function listPreferredChannelMatches(info, mediaType, season, episode) {
+  if (!PREFERRED_CHANNELS.length) {
     return Promise.resolve([]);
   }
 
-  var jobs = [];
-  PREFERRED_CHANNELS.forEach(function (channel) {
-    queries.forEach(function (query) {
-      jobs.push(searchChannelVideos(channel, query));
+  return Promise.all(PREFERRED_CHANNELS.map(listChannelVideos)).then(function (groups) {
+    var videos = [];
+    groups.forEach(function (group) {
+      videos = videos.concat(group);
     });
-  });
-
-  return Promise.all(jobs).then(function (groups) {
-    var seen = {};
-    var results = [];
-    groups.forEach(function (videos) {
-      videos.forEach(function (video) {
-        if (!video.id || seen[video.id]) return;
-        seen[video.id] = true;
-        video.channel = video.channel || "moremusic";
-        results.push(video);
-      });
-    });
-    return results;
+    return filterVideos(videos, info, mediaType, season, episode);
   });
 }
 
-function searchChannelVideos(channel, query) {
-  var url =
-    "https://api.dailymotion.com/user/" +
-    encodeURIComponent(channel) +
-    "/videos?search=" +
-    encodeURIComponent(query) +
-    "&fields=id,title,duration,url" +
-    "&limit=30&sort=relevance";
+function listChannelVideos(channel) {
+  var cached = channelCatalogCache[channel];
+  var now = Date.now();
+  if (cached && now - cached.at < 10 * 60 * 1000) {
+    return Promise.resolve(cached.videos);
+  }
 
-  console.log("[Dailymotion] Channel " + channel + ": " + query);
+  var videos = [];
+  var page = 1;
 
-  return fetch(url, {
-    headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
-  })
-    .then(function (response) {
-      return response.json();
+  function next() {
+    var url =
+      "https://api.dailymotion.com/user/" +
+      encodeURIComponent(channel) +
+      "/videos?fields=id,title,duration,url&limit=100&page=" +
+      page +
+      "&sort=recent";
+
+    console.log("[Dailymotion] Listing channel " + channel + " page " + page);
+
+    return fetch(url, {
+      headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
     })
-    .then(function (data) {
-      return (data.list || []).map(function (video) {
-        video.channel = channel;
-        return video;
+      .then(function (response) {
+        return response.json();
+      })
+      .then(function (data) {
+        (data.list || []).forEach(function (video) {
+          video.channel = channel;
+          videos.push(video);
+        });
+        if (data.has_more && page < 5) {
+          page += 1;
+          return next();
+        }
+        channelCatalogCache[channel] = { at: now, videos: videos };
+        return videos;
+      })
+      .catch(function (error) {
+        console.error(
+          "[Dailymotion] Channel list failed: " + (error && error.message)
+        );
+        return videos;
       });
-    })
-    .catch(function (error) {
-      console.error(
-        "[Dailymotion] Channel search failed: " + (error && error.message)
-      );
-      return [];
-    });
+  }
+
+  return next();
 }
 
 function searchDailymotion(query) {
@@ -385,7 +389,8 @@ function extractStreams(video) {
   var streams = [];
   var qualities = video.qualities || {};
   var title = video.title || "Dailymotion";
-  var channel = video.channel ? " · " + video.channel : "";
+  var channel = video.channel || "";
+  var sourceName = channel ? "DM · " + channel : "Dailymotion";
   var seen = {};
 
   Object.keys(qualities).forEach(function (label) {
@@ -398,8 +403,8 @@ function extractStreams(video) {
       var type = entry.type === "application/x-mpegURL" || url.indexOf(".m3u8") !== -1 ? "hls" : "mp4";
       var quality = label === "auto" ? "Auto" : /p$/.test(label) ? label : label + "p";
       streams.push({
-        name: "Dailymotion",
-        title: title + channel + " [" + quality + "]",
+        name: sourceName,
+        title: title + " [" + quality + "]",
         url: url,
         quality: quality,
         type: type,
