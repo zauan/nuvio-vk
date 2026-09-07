@@ -1,0 +1,27 @@
+{
+  "id": "com.nuvio.vkvideo",
+  "name": "VK Video",
+  "version": "1.0.0",
+  "description": "Stream movies and series directly from VK Video",
+  "icon": "https://vk.com/favicon.ico",
+  "author": "Nuvio Developer",
+  "homepage": "https://github.com/zauan/nuvio-vk",
+  "entrypoint": "plugin.js",
+  "types": [
+    "movie",
+    "series",
+    "anime"
+  ],
+  "permissions": [
+    "network"
+  ],
+  "settings": [
+    {
+      "key": "accessToken",
+      "type": "string",
+      "title": "VK Service Access Token (Optional)",
+      "description": "Provide a VK API token to increase rate limits and access restricted streams",
+      "default": ""
+    }
+  ]
+}
