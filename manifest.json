@@ -1,6 +1,6 @@
 {
   "name": "VK Video",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "scrapers": [
     {
       "id": "vkvideo",
@@ -19,7 +19,7 @@
       "id": "dailymotion",
       "name": "Dailymotion",
       "description": "Stream movies and shows from Dailymotion",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Nuvio Developer",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/dailymotion.js",
