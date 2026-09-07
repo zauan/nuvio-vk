@@ -2,12 +2,13 @@
  * Nuvio provider: Dailymotion
  * File: providers/dailymotion.js
  *
- * Hermes-safe: Promise chains only (no async/await).
+ * QuickJS / Hermes-safe: Promise chains only (no async/await).
+ * No Node APIs (no require/child_process).
  *
- * Playback note: cdndirector.dailymotion.com often returns Cloudflare 403 (E005)
- * to non-browser TLS stacks. When possible we resolve the master playlist in
- * the provider and return a data: HLS master that points at vod*.cf.dmcdn.net
- * (those URLs play without browser impersonation).
+ * Playback: cdndirector.dailymotion.com is often Cloudflare-blocked for
+ * native players. We resolve the master playlist to vod*.cf.dmcdn.net URLs
+ * and re-host that small master on HTTPS (catbox) so Nuvio gets a normal
+ * https://...m3u8 URL.
  */
 
 var TMDB_API_KEY = "68e094699525b18a70bab2f86b1fa706";
@@ -56,18 +57,19 @@ var MONTHS_EN = [
 // Prefer moremusic (https://www.dailymotion.com/user/moremusic/videos) for Romanian TV.
 var VIDEO_MAP = {
   // Insula Iubirii - Reuniuni
-  "329884:tv:1:1": ["xarl2pi", "xarlbya", "xarl8oa", "xarlcca"],
-  "329884:tv:1:2": ["xatiixa", "xatoa4a", "xb29ztq", "xatofku"],
-  "329884:tv:1:3": ["xavja42", "xavk1qe", "xb3dblm"],
-  "329884:tv:1:4": ["xaxi3hi", "xaxij32", "xb18vky", "xb0uzt6"],
-  "329884:tv:1:5": ["xazd6le", "xaze0iu", "xb0oueq"],
-  // Insula Iubirii (main show) S10 — moremusic + mirrors
+  "329884:tv:1:1": ["xarl2pi", "xarlbya"],
+  "329884:tv:1:2": ["xatiixa", "xatoa4a"],
+  "329884:tv:1:3": ["xavja42", "xavk1qe"],
+  "329884:tv:1:4": ["xaxi3hi", "xaxij32"],
+  "329884:tv:1:5": ["xazd6le", "xaze0iu"],
+  // Insula Iubirii (main show) S10
   "62767:tv:10:1": ["xb40hte", "xb40jxy"],
-  "62767:tv:10:2": ["xb4faau", "xb4bkqi", "xb4axsq", "xb4b01e"],
+  "62767:tv:10:2": ["xb4faau", "xb4bkqi", "xb4axsq"],
 };
 
 var PREFERRED_CHANNELS = ["moremusic"];
-var MAX_VIDEOS = 25;
+var MAX_VIDEOS = 6;
+var PLAYLIST_TIMEOUT_MS = 8000;
 var channelCatalogCache = {};
 var sessionWarmup = null;
 
@@ -83,11 +85,17 @@ function getStreams(tmdbId, mediaType, season, episode) {
     })
     .then(function (info) {
       var mappedIds = VIDEO_MAP[mapKey(tmdbId, mediaType, season, episode)] || [];
-      var queries = buildSearchQueries(info, mediaType, season, episode);
 
-      var mapped = Promise.all(mappedIds.map(getVideoMetadata)).then(function (videos) {
-        return videos.filter(Boolean);
-      });
+      // Mapped episodes: skip search (fast, reliable — same approach as VK).
+      if (mappedIds.length) {
+        return Promise.all(mappedIds.map(getVideoMetadata)).then(function (videos) {
+          var mapped = videos.filter(Boolean);
+          console.log("[Dailymotion] Using " + mapped.length + " mapped video(s)");
+          return mapped;
+        });
+      }
+
+      var queries = buildSearchQueries(info, mediaType, season, episode);
       var fromChannels = listPreferredChannelMatches(info, mediaType, season, episode);
       var fromChannelSearch = searchPreferredChannels(queries).then(function (videos) {
         return filterVideos(videos, info, mediaType, season, episode);
@@ -96,28 +104,16 @@ function getStreams(tmdbId, mediaType, season, episode) {
         return filterVideos(videos, info, mediaType, season, episode);
       });
 
-      return Promise.all([mapped, fromChannels, fromChannelSearch, fromGlobal]).then(function (parts) {
+      return Promise.all([fromChannels, fromChannelSearch, fromGlobal]).then(function (parts) {
         var combined = sortVideos(
-          uniqueVideos(parts[0].concat(parts[1]).concat(parts[2]).concat(parts[3]))
+          uniqueVideos(parts[0].concat(parts[1]).concat(parts[2]))
         ).slice(0, MAX_VIDEOS);
-        console.log(
-          "[Dailymotion] Matched " +
-            combined.length +
-            " videos (" +
-            parts[0].length +
-            " mapped, " +
-            parts[1].length +
-            " channel, " +
-            parts[2].length +
-            " channel-search, " +
-            parts[3].length +
-            " search)"
-        );
+        console.log("[Dailymotion] Matched " + combined.length + " videos");
         return combined;
       });
     })
     .then(function (videos) {
-      return Promise.all(videos.map(streamsFromVideo)).then(function (groups) {
+      return mapLimited(videos, 2, streamsFromVideo).then(function (groups) {
         var streams = [];
         groups.forEach(function (group) {
           streams = streams.concat(group);
@@ -142,8 +138,7 @@ function warmSession() {
     },
   })
     .then(function (response) {
-      var cookie = mergeCookies("", readSetCookies(response));
-      return cookie;
+      return mergeCookies("", readSetCookies(response));
     })
     .catch(function () {
       return "";
@@ -230,13 +225,8 @@ function buildSearchQueries(info, mediaType, season, episode) {
     if (mediaType === "tv" && season && episode) {
       queries.push(title + " sezonul " + season + " ep " + episode);
       queries.push(title + " sezonul " + season + " episodul " + episode);
-      queries.push(title + " sezonul " + season + " episode " + episode);
       queries.push(title + " s" + pad(season) + "e" + pad(episode));
       queries.push(title + " episodul " + episode);
-      queries.push(title + " episode " + episode);
-      if (Number(season) > 1) {
-        queries.push(title + " sezonul " + season);
-      }
       if (info.airDate) {
         var dateQuery = dateSearchText(info.airDate);
         if (dateQuery) queries.push(title + " " + dateQuery);
@@ -248,7 +238,7 @@ function buildSearchQueries(info, mediaType, season, episode) {
     }
   });
 
-  return uniqueStrings(queries);
+  return uniqueStrings(queries).slice(0, 6);
 }
 
 function searchAllQueries(queries) {
@@ -256,7 +246,7 @@ function searchAllQueries(queries) {
   var results = [];
 
   function next(index) {
-    if (index >= queries.length || results.length >= 60) {
+    if (index >= queries.length || results.length >= 30) {
       return Promise.resolve(results);
     }
     return searchDailymotion(queries[index]).then(function (videos) {
@@ -277,7 +267,7 @@ function searchPreferredChannels(queries) {
     return Promise.resolve([]);
   }
 
-  var limited = queries.slice(0, 4);
+  var limited = queries.slice(0, 3);
   var jobs = [];
   PREFERRED_CHANNELS.forEach(function (channel) {
     limited.forEach(function (query) {
@@ -315,46 +305,31 @@ function listChannelVideos(channel) {
     return Promise.resolve(cached.videos);
   }
 
-  var videos = [];
-  var page = 1;
+  var url =
+    "https://api.dailymotion.com/user/" +
+    encodeURIComponent(channel) +
+    "/videos?fields=id,title,duration,url&limit=100&page=1&sort=recent";
 
-  function next() {
-    var url =
-      "https://api.dailymotion.com/user/" +
-      encodeURIComponent(channel) +
-      "/videos?fields=id,title,duration,url&limit=100&page=" +
-      page +
-      "&sort=recent";
+  console.log("[Dailymotion] Listing channel " + channel);
 
-    console.log("[Dailymotion] Listing channel " + channel + " page " + page);
-
-    return fetch(url, {
-      headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
+  return fetch(url, {
+    headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
+  })
+    .then(function (response) {
+      return response.json();
     })
-      .then(function (response) {
-        return response.json();
-      })
-      .then(function (data) {
-        (data.list || []).forEach(function (video) {
-          video.channel = channel;
-          videos.push(video);
-        });
-        if (data.has_more && page < 8) {
-          page += 1;
-          return next();
-        }
-        channelCatalogCache[channel] = { at: now, videos: videos };
-        return videos;
-      })
-      .catch(function (error) {
-        console.error(
-          "[Dailymotion] Channel list failed: " + (error && error.message)
-        );
-        return videos;
+    .then(function (data) {
+      var videos = (data.list || []).map(function (video) {
+        video.channel = channel;
+        return video;
       });
-  }
-
-  return next();
+      channelCatalogCache[channel] = { at: now, videos: videos };
+      return videos;
+    })
+    .catch(function (error) {
+      console.error("[Dailymotion] Channel list failed: " + (error && error.message));
+      return [];
+    });
 }
 
 function searchChannelVideos(channel, query) {
@@ -363,9 +338,7 @@ function searchChannelVideos(channel, query) {
     encodeURIComponent(channel) +
     "/videos?search=" +
     encodeURIComponent(query) +
-    "&fields=id,title,duration,url&limit=30&sort=relevance";
-
-  console.log("[Dailymotion] Channel search " + channel + ": " + query);
+    "&fields=id,title,duration,url&limit=20&sort=relevance";
 
   return fetch(url, {
     headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
@@ -389,7 +362,7 @@ function searchDailymotion(query) {
     "https://api.dailymotion.com/videos?search=" +
     encodeURIComponent(query) +
     "&fields=id,title,duration,url,owner.username" +
-    "&limit=30&sort=relevance";
+    "&limit=20&sort=relevance";
 
   console.log("[Dailymotion] Search: " + query);
 
@@ -415,7 +388,7 @@ function searchDailymotion(query) {
 
 function getVideoMetadata(videoId) {
   return warmSession().then(function (baseCookie) {
-    return fetch(
+    return fetchWithTimeout(
       "https://www.dailymotion.com/player/metadata/video/" +
         videoId +
         "?app=com.dailymotion.neon",
@@ -426,7 +399,8 @@ function getVideoMetadata(videoId) {
           Referer: "https://www.dailymotion.com/",
           Cookie: mergeCookies(baseCookie, "family_filter=off; ff=off"),
         },
-      }
+      },
+      PLAYLIST_TIMEOUT_MS
     )
       .then(function (response) {
         var cookie = mergeCookies(baseCookie, readSetCookies(response));
@@ -499,246 +473,218 @@ function streamsFromVideo(video) {
 }
 
 function resolveStreams(video) {
-  var extracted = extractStreams(video);
-  if (!extracted.length) return Promise.resolve([]);
+  var base = extractDirectorStream(video);
+  if (!base) return Promise.resolve([]);
 
-  return Promise.all(
-    extracted.map(function (stream) {
-      if (stream.type !== "hls") return Promise.resolve([stream]);
-      return resolvePlayableHls(stream, video.cookie || "").then(function (resolved) {
-        return resolved && resolved.length ? resolved : [stream];
-      });
-    })
-  ).then(function (groups) {
-    var streams = [];
-    groups.forEach(function (group) {
-      streams = streams.concat(group);
-    });
-    return streams;
+  return resolvePlayableHls(base, video.cookie || "").then(function (resolved) {
+    return resolved && resolved.length ? resolved : [base];
   });
 }
 
-function extractStreams(video) {
-  var streams = [];
+function extractDirectorStream(video) {
   var qualities = video.qualities || {};
   var title = video.title || "Dailymotion";
   var channel = video.channel || "";
   var sourceName = channel ? "DM · " + channel : "Dailymotion";
-  var seen = {};
-  var headers = Object.assign({}, PLAYBACK_HEADERS);
+  var headers = copyHeaders(PLAYBACK_HEADERS);
   if (video.cookie) headers.Cookie = video.cookie;
 
-  Object.keys(qualities).forEach(function (label) {
-    var entries = qualities[label] || [];
-    entries.forEach(function (entry) {
-      var url = httpUrl(entry && entry.url);
-      if (!url || seen[url]) return;
-      seen[url] = true;
+  var auto = qualities.auto || [];
+  for (var i = 0; i < auto.length; i++) {
+    var url = httpUrl(auto[i] && auto[i].url);
+    if (!url) continue;
+    var v1st = queryParam(url, "dmV1st");
+    if (v1st) {
+      headers.Cookie = mergeCookies(headers.Cookie || "", "v1st=" + v1st);
+    }
+    return {
+      name: sourceName,
+      title: title + " [Auto]",
+      url: url,
+      quality: "Auto",
+      type: "hls",
+      headers: headers,
+    };
+  }
 
-      // Keep v1st cookie aligned with the signed playlist URL.
-      var v1st = queryParam(url, "dmV1st");
-      if (v1st) {
-        headers = Object.assign({}, headers, {
-          Cookie: mergeCookies(headers.Cookie || "", "v1st=" + v1st),
-        });
-      }
-
-      var type =
-        entry.type === "application/x-mpegURL" || url.indexOf(".m3u8") !== -1
-          ? "hls"
-          : "mp4";
-      var quality = label === "auto" ? "Auto" : /p$/.test(label) ? label : label + "p";
-      streams.push({
+  // Fallback: first available quality URL
+  var labels = Object.keys(qualities);
+  for (var j = 0; j < labels.length; j++) {
+    var entries = qualities[labels[j]] || [];
+    for (var k = 0; k < entries.length; k++) {
+      var fallbackUrl = httpUrl(entries[k] && entries[k].url);
+      if (!fallbackUrl) continue;
+      return {
         name: sourceName,
-        title: title + " [" + quality + "]",
-        url: url,
-        quality: quality,
-        type: type,
+        title: title + " [" + labels[j] + "]",
+        url: fallbackUrl,
+        quality: labels[j],
+        type: fallbackUrl.indexOf(".m3u8") !== -1 ? "hls" : "mp4",
         headers: headers,
-      });
-    });
-  });
+      };
+    }
+  }
 
-  return streams;
+  return null;
 }
 
 function resolvePlayableHls(stream, cookie) {
-  var headers = Object.assign({}, stream.headers || PLAYBACK_HEADERS);
+  var headers = copyHeaders(stream.headers || PLAYBACK_HEADERS);
   if (cookie) headers.Cookie = mergeCookies(headers.Cookie || "", cookie);
 
-  return fetchPlaylistText(stream.url, headers)
-    .then(function (body) {
-      if (!body || body.indexOf("#EXTM3U") !== 0) {
-        throw new Error("invalid playlist");
-      }
-      if (body.indexOf("dmcdn.net") === -1 && body.indexOf("dailymotion.com") === -1) {
-        throw new Error("unexpected playlist body");
-      }
-
-      var cleaned = body.replace(/#cell=[^\s]+/g, "").trim() + "\n";
-      var variants = parseHlsVariants(cleaned);
-      var streams = [];
-
-      // data: master avoids cdndirector Cloudflare 403 during playback.
-      streams.push({
-        name: stream.name,
-        title: stream.title.replace(" [Auto]", " [HLS]"),
-        url: "data:application/vnd.apple.mpegurl," + encodeURIComponent(cleaned),
-        quality: stream.quality === "Auto" ? "HLS" : stream.quality,
-        type: "hls",
-        headers: headers,
-      });
-
-      variants
-        .sort(function (a, b) {
-          return b.bandwidth - a.bandwidth;
-        })
-        .forEach(function (variant) {
-          if (!variant.videoUrl) return;
-          var label = variant.name || (variant.height ? variant.height + "p" : "Auto");
-          if (label && !/p$/.test(label) && /^\d+$/.test(label)) label = label + "p";
-          var mini = buildVariantMaster(variant);
-          streams.push({
-            name: stream.name,
-            title: stream.title.replace(/\s\[[^\]]+\]$/, "") + " [" + label + "]",
-            url: "data:application/vnd.apple.mpegurl," + encodeURIComponent(mini),
-            quality: label,
-            type: "hls",
-            headers: headers,
-          });
-        });
-
-      console.log(
-        "[Dailymotion] Resolved HLS for " +
-          (stream.title || "") +
-          " → " +
-          streams.length +
-          " playable playlist(s)"
-      );
-      return streams;
-    })
-    .catch(function (error) {
-      console.error(
-        "[Dailymotion] HLS resolve failed, using director URL: " +
-          (error && error.message ? error.message : error)
-      );
-      return [stream];
-    });
-}
-
-function fetchPlaylistText(url, headers) {
-  return fetch(url, { headers: headers })
+  return fetchWithTimeout(stream.url, { headers: headers }, PLAYLIST_TIMEOUT_MS)
     .then(function (response) {
       if (!response.ok) {
         throw new Error("playlist HTTP " + response.status);
       }
       return response.text();
     })
-    .catch(function (error) {
-      // Node's TLS fingerprint is blocked by Cloudflare; Python requests often works.
-      // Hermes/OkHttp on device usually succeeds with the fetch path above.
-      return fetchPlaylistViaPython(url, headers).then(function (body) {
-        if (body) return body;
-        throw error;
-      });
-    });
-}
-
-function fetchPlaylistViaPython(url, headers) {
-  try {
-    if (typeof process === "undefined" || !process.versions || !process.versions.node) {
-      return Promise.resolve("");
-    }
-    var childProcess = require("child_process");
-    var payload = JSON.stringify({
-      url: url,
-      headers: headers || {},
-    });
-    return new Promise(function (resolve) {
-      var child = childProcess.spawn(
-        "python3",
-        [
-          "-c",
-          "import json,sys,requests;p=json.load(sys.stdin);r=requests.get(p['url'],headers=p.get('headers') or {},timeout=20);sys.stdout.write(r.text if r.ok else '')",
-        ],
-        { stdio: ["pipe", "pipe", "ignore"] }
-      );
-      var out = "";
-      child.stdout.on("data", function (chunk) {
-        out += chunk;
-      });
-      child.on("error", function () {
-        resolve("");
-      });
-      child.on("close", function () {
-        resolve(out && out.indexOf("#EXTM3U") === 0 ? out : "");
-      });
-      child.stdin.write(payload);
-      child.stdin.end();
-    });
-  } catch (e) {
-    return Promise.resolve("");
-  }
-}
-
-function parseHlsVariants(master) {
-  var lines = String(master).split(/\r?\n/);
-  var audio = {};
-  var variants = [];
-  var pending = null;
-
-  lines.forEach(function (line) {
-    if (line.indexOf("#EXT-X-MEDIA:") === 0 && /TYPE=AUDIO/.test(line)) {
-      var groupId = attrValue(line, "GROUP-ID");
-      var uri = attrValue(line, "URI");
-      if (groupId && uri) audio[groupId] = uri;
-      return;
-    }
-    if (line.indexOf("#EXT-X-STREAM-INF:") === 0) {
-      pending = {
-        bandwidth: Number(attrValue(line, "BANDWIDTH") || 0),
-        name: attrValue(line, "NAME") || "",
-        height: 0,
-        audioGroup: attrValue(line, "AUDIO") || "",
-        videoUrl: "",
-      };
-      var resolution = attrValue(line, "RESOLUTION") || "";
-      if (resolution.indexOf("x") !== -1) {
-        pending.height = Number(resolution.split("x")[1] || 0);
-        if (!pending.name && pending.height) pending.name = String(pending.height);
+    .then(function (body) {
+      if (!body || body.indexOf("#EXTM3U") !== 0) {
+        throw new Error("invalid playlist");
       }
-      return;
-    }
-    if (pending && line && line.indexOf("#") !== 0) {
-      pending.videoUrl = line.trim();
-      pending.audioUrl = pending.audioGroup ? audio[pending.audioGroup] || "" : "";
-      variants.push(pending);
-      pending = null;
-    }
-  });
+      if (body.indexOf("dmcdn.net") === -1) {
+        throw new Error("playlist missing vod urls");
+      }
 
-  return variants;
+      var cleaned = body.replace(/#cell=[^\s]+/g, "").trim() + "\n";
+      return hostPlaylist(cleaned).then(function (hostedUrl) {
+        if (!hostedUrl) {
+          throw new Error("playlist host failed");
+        }
+        console.log("[Dailymotion] Hosted playable HLS for " + (stream.title || ""));
+        return [
+          {
+            name: stream.name,
+            title: String(stream.title || "Dailymotion").replace(" [Auto]", " [HLS]"),
+            url: hostedUrl,
+            quality: "HLS",
+            type: "hls",
+            headers: headers,
+          },
+        ];
+      });
+    })
+    .catch(function (error) {
+      console.error(
+        "[Dailymotion] HLS resolve failed: " +
+          (error && error.message ? error.message : error)
+      );
+      // Last resort: director URL (may 403 on some devices).
+      return [stream];
+    });
 }
 
-function buildVariantMaster(variant) {
-  var lines = ["#EXTM3U"];
-  if (variant.audioUrl) {
-    lines.push(
-      '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Audio",AUTOSELECT=YES,DEFAULT=YES,URI="' +
-        variant.audioUrl +
-        '"'
-    );
-    lines.push(
-      "#EXT-X-STREAM-INF:BANDWIDTH=" +
-        (variant.bandwidth || 1000000) +
-        (variant.height ? ",RESOLUTION=1x" + variant.height : "") +
-        ',AUDIO="aud"'
-    );
-  } else {
-    lines.push("#EXT-X-STREAM-INF:BANDWIDTH=" + (variant.bandwidth || 1000000));
+function hostPlaylist(playlistText) {
+  var boundary = "----NuvioDM" + String(Date.now()) + "X";
+  var body =
+    "--" +
+    boundary +
+    "\r\n" +
+    'Content-Disposition: form-data; name="reqtype"\r\n\r\n' +
+    "fileupload\r\n" +
+    "--" +
+    boundary +
+    "\r\n" +
+    'Content-Disposition: form-data; name="fileToUpload"; filename="playlist.m3u8"\r\n' +
+    "Content-Type: application/vnd.apple.mpegurl\r\n\r\n" +
+    playlistText +
+    "\r\n--" +
+    boundary +
+    "--\r\n";
+
+  return fetchWithTimeout(
+    "https://catbox.moe/user/api.php",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "multipart/form-data; boundary=" + boundary,
+        "User-Agent": USER_AGENT,
+      },
+      body: body,
+    },
+    PLAYLIST_TIMEOUT_MS
+  )
+    .then(function (response) {
+      return response.text();
+    })
+    .then(function (text) {
+      var url = String(text || "").trim();
+      if (url.indexOf("https://") === 0 && url.indexOf(".m3u8") !== -1) {
+        return url;
+      }
+      return "";
+    })
+    .catch(function () {
+      return "";
+    });
+}
+
+function fetchWithTimeout(url, options, ms) {
+  // QuickJS may not provide timers; plain fetch is fine then.
+  if (typeof setTimeout !== "function") {
+    return fetch(url, options || {});
   }
-  lines.push(variant.videoUrl);
-  return lines.join("\n") + "\n";
+
+  return new Promise(function (resolve, reject) {
+    var settled = false;
+    var timer = setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      reject(new Error("timeout " + ms + "ms"));
+    }, ms || PLAYLIST_TIMEOUT_MS);
+
+    fetch(url, options || {})
+      .then(function (response) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(response);
+      })
+      .catch(function (error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
+function mapLimited(items, concurrency, worker) {
+  var results = new Array(items.length);
+  var index = 0;
+
+  function next() {
+    if (index >= items.length) {
+      return Promise.resolve();
+    }
+    var current = index++;
+    return Promise.resolve()
+      .then(function () {
+        return worker(items[current], current);
+      })
+      .then(function (value) {
+        results[current] = value;
+      })
+      .catch(function () {
+        results[current] = [];
+      })
+      .then(next);
+  }
+
+  var starters = [];
+  var n = Math.min(concurrency || 2, items.length);
+  for (var i = 0; i < n; i++) {
+    starters.push(next());
+  }
+
+  if (!starters.length) {
+    return Promise.resolve([]);
+  }
+
+  return Promise.all(starters).then(function () {
+    return results;
+  });
 }
 
 function sortVideos(videos) {
@@ -942,21 +888,29 @@ function queryParam(url, key) {
   return match ? decodeURIComponent(match[1]) : "";
 }
 
-function attrValue(line, name) {
-  var match = String(line).match(new RegExp(name + '="([^"]*)"'));
-  if (match) return match[1];
-  match = String(line).match(new RegExp(name + "=([^,\\s]+)"));
-  return match ? match[1] : "";
+function copyHeaders(source) {
+  var out = {};
+  if (!source) return out;
+  for (var key in source) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) {
+      out[key] = source[key];
+    }
+  }
+  return out;
 }
 
 function readSetCookies(response) {
   if (!response || !response.headers) return "";
   var list = [];
-  if (typeof response.headers.getSetCookie === "function") {
-    list = response.headers.getSetCookie() || [];
-  } else {
-    var single = response.headers.get && response.headers.get("set-cookie");
-    if (single) list = [single];
+  try {
+    if (typeof response.headers.getSetCookie === "function") {
+      list = response.headers.getSetCookie() || [];
+    } else if (typeof response.headers.get === "function") {
+      var single = response.headers.get("set-cookie");
+      if (single) list = [single];
+    }
+  } catch (e) {
+    return "";
   }
   return list
     .map(function (item) {
